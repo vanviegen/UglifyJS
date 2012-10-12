@@ -15,6 +15,8 @@ var options = {
     mangle_toplevel: false,
     no_mangle_functions: false,
     squeeze: true,
+    annotate: false,
+    annotatation_map: false,
     make_seqs: true,
     dead_code: true,
     verbose: false,
@@ -28,6 +30,7 @@ var options = {
     codegen_options: {
         ascii_only: false,
         beautify: false,
+        line_per_function: false,
         indent_level: 4,
         indent_start: 0,
         quote_keys: false,
@@ -52,6 +55,9 @@ out: while (args.length > 0) {
       case "--consolidate-primitive-values":
         options.consolidate = true;
         break;
+      case "--line-per-function":
+        options.codegen_options.line_per_function = true;
+        break;
       case "-i":
       case "--indent":
         options.codegen_options.indent_level = args.shift();
@@ -75,6 +81,14 @@ out: while (args.length > 0) {
       case "--no-squeeze":
       case "-ns":
         options.squeeze = false;
+        break;
+      case "--annotate":
+      case "-a":
+        options.annotate = true;
+        break;
+      case "--annotation-map":
+      case "-am":
+        options.annotation_map = args.shift();
         break;
       case "--no-seqs":
         options.make_seqs = false;
@@ -220,13 +234,13 @@ if (options.make) {
         else if (file.hide) {
             code = "(function(){" + code + "}());";
         }
-        return squeeze_it(code);
+        return squeeze_it(code,file.name);
     }).join("\n"));
 }
 else if (filename) {
     fs.readFile(filename, "utf8", function(err, text){
         if (err) throw err;
-        output(squeeze_it(text));
+        output(squeeze_it(text,filename));
     });
 }
 else {
@@ -275,15 +289,16 @@ function show_copyright(comments) {
     return ret;
 };
 
-function squeeze_it(code) {
+function squeeze_it(code,filename) {
     var result = "";
     if (options.show_copyright) {
         var tok = jsp.tokenizer(code), c;
         c = tok();
         result += show_copyright(c.comments_before);
     }
+    code = jsp.tokenizer(code,filename);
     try {
-        var ast = time_it("parse", function(){ return jsp.parse(code); });
+        var ast = time_it("parse", function(){ return jsp.parse(code,false,!!options.annotate); });
         if (options.consolidate) ast = time_it("consolidate", function(){
             return consolidator.ast_consolidate(ast);
         });
@@ -310,6 +325,38 @@ function squeeze_it(code) {
                 ast = pro.ast_squeeze_more(ast);
             return ast;
         });
+        if (options.annotate) {
+            var map, oldSson, newJson, am = options.annotation_map;
+            if (am) {
+                var locked = false;
+                while(true) {
+					try {
+						fs.close(fs.openSync(am+'.lock','wx'));
+						break; // lock file created
+					}
+					catch(e) {}
+                    if (!locked) {
+                        process.stderr.write("waiting for '"+am+".lock'\n");
+                        locked = true;
+                    }
+                    // In any sensible environment we would be doing a
+                    // sleep(100ms) or something like that here (in fact: we'd
+                    // be doing a flock()). Unfortunately node doesn't seem to
+                    // care for basic OS abstractions, so we'll just keep
+                    // hammering the CPU.
+                }
+                
+                oldJson = fs.readFileSync(am).toString();
+                map = (oldJson=='') ? {} : JSON.parse(oldJson);
+            }
+            ast = time_it("annotate", function(){ return pro.ast_annotate(ast, {map: map}); });
+            if (am) {
+                newJson = JSON.stringify(map);
+                if (newJson != oldJson)
+                    fs.writeFileSync(am, newJson);
+                fs.unlink(am+'.lock');
+            }
+        }
         if (options.ast)
             return sys.inspect(ast, null, null);
         result += time_it("generate", function(){ return pro.gen_code(ast, options.codegen_options) });
